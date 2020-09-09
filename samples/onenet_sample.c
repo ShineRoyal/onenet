@@ -1,43 +1,33 @@
 /*
- * File      : onenet_sample.c
- * COPYRIGHT (C) 2006 - 2018, RT-Thread Development Team
+ * Copyright (c) 2006-2020, RT-Thread Development Team
  *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License along
- *  with this program; if not, write to the Free Software Foundation, Inc.,
- *  51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ * SPDX-License-Identifier: Apache-2.0
  *
  * Change Logs:
  * Date           Author       Notes
- * 2018-04-24     chenyong     first version
+ * 2020-08-05     Shine       the first version
  */
+#include <rtthread.h>
+#include <rtdevice.h>
+#include <drv_common.h>
+
 #include <stdlib.h>
 
 #include <onenet.h>
-
-#define DBG_ENABLE
-#define DBG_COLOR
-#define DBG_SECTION_NAME    "onenet.sample"
-#if ONENET_DEBUG
-#define DBG_LEVEL           DBG_LOG
-#else
-#define DBG_LEVEL           DBG_INFO
-#endif /* ONENET_DEBUG */
-
-#include <rtdbg.h>
-
-#ifdef FINSH_USING_MSH
 #include <finsh.h>
 
+#define DBG_TAG "app.onenet"
+#define DBG_LVL DBG_LOG
+#include <rtdbg.h>
+
+#include <easyflash.h>
+
+int mqtt_connect_status = 0;
+
+#include <arpa/inet.h>
+#include <netdev.h>
+
+#include <paho_mqtt.h>
 /* upload random value to temperature*/
 static void onenet_upload_entry(void *parameter)
 {
@@ -47,14 +37,14 @@ static void onenet_upload_entry(void *parameter)
     {
         value = rand() % 100;
 
-        if (onenet_mqtt_upload_digit("temperature", value) < 0)
+        if (onenet_mqtt_upload_digit(1, "temperature", value) < 0)
         {
-            LOG_E("upload has an error, stop uploading");
+            log_e("upload has an error, stop uploading");
             break;
         }
         else
         {
-            LOG_D("buffer : {\"temperature\":%d}", value);
+            //log_d("buffer : {\"temperature\":%d}", value);
         }
 
         rt_thread_delay(rt_tick_from_millisecond(5 * 1000));
@@ -64,13 +54,7 @@ static void onenet_upload_entry(void *parameter)
 int onenet_upload_cycle(void)
 {
     rt_thread_t tid;
-
-    tid = rt_thread_create("onenet_send",
-                           onenet_upload_entry,
-                           RT_NULL,
-                           2 * 1024,
-                           RT_THREAD_PRIORITY_MAX / 3 - 1,
-                           5);
+    tid = rt_thread_create("onenet_send", onenet_upload_entry, RT_NULL, 2 * 1024, RT_THREAD_PRIORITY_MAX / 3 - 1, 5);
     if (tid)
     {
         rt_thread_startup(tid);
@@ -80,61 +64,91 @@ int onenet_upload_cycle(void)
 }
 MSH_CMD_EXPORT(onenet_upload_cycle, send data to OneNET cloud cycle);
 
-int onenet_publish_digit(int argc, char **argv)
+
+/**
+ * OneNET自动连接线程，当网络连接正常时，开始执行mqtt初始化
+ * @param parameter
+ */
+static void onenet_start_thread_entry(void *parameter)
 {
-    if (argc != 3)
+    struct netdev *dev = RT_NULL;
+    while (1)
     {
-        LOG_E("onenet_publish [datastream_id]  [value]  - mqtt pulish digit data to OneNET.");
-        return -1;
-    }
+        dev = netdev_get_first_by_flags(NETDEV_FLAG_INTERNET_UP);
+        if (dev == RT_NULL)
+        {
+            LOG_D("wait netdev internet up...");
+            rt_thread_mdelay(1000);
+        }
+        else
+        {
+            LOG_I("local ip is:%d.%d.%d.%d", (((dev->ip_addr.addr) >> 0) & 0xFF), (((dev->ip_addr.addr) >> 8) & 0xFF), (((dev->ip_addr.addr) >> 16) & 0xFF),
+                  (((dev->ip_addr.addr) >> 24) & 0xFF));
+            break;
+        }
 
-    if (onenet_mqtt_upload_digit(argv[1], atoi(argv[2])) < 0)
+    }
+    mqtt_connect_status = 1;
+    LOG_D("onenet begin...");
+    /* set the onenet mqtt command response callback function */
+    //onenet_set_cmd_rsp_cb(onenet_cmd_rsp_cb);   //设置onenet下发指令回调函数
+    extern rt_err_t onenet_mqtt_init(int group);
+    onenet_mqtt_init(1);
+
+
+}
+
+/**
+ * 创建onenet启动线程
+ * 用于网络连接正常时，onenet自动连接
+ * */
+static int onenet_start_thread_init(void)
+{
+    rt_thread_t thread = rt_thread_create("one_init", onenet_start_thread_entry, RT_NULL, 8192, 25, 10);
+    if (thread != RT_NULL)
     {
-        LOG_E("upload digit data has an error!\n");
+        rt_thread_startup(thread);
     }
-
     return 0;
 }
-MSH_CMD_EXPORT_ALIAS(onenet_publish_digit, onenet_mqtt_publish_digit, send digit data to onenet cloud);
+//INIT_APP_EXPORT(onenet_start_thread_init);
 
-int onenet_publish_string(int argc, char **argv)
+/**
+ * 用于OneNET平台测试
+ * @return
+ */
+int stp_param(void)
 {
-    if (argc != 3)
-    {
-        LOG_E("onenet_publish [datastream_id]  [string]  - mqtt pulish string data to OneNET.");
-        return -1;
-    }
+    ef_set_env_blob("dev_name1", "panpan", strlen("panpan"));
+    ef_set_env_blob("sn1", "sn999", strlen("sn999"));
+    ef_set_env_blob("regist_url1", "http://api.heclouds.com/register_de?register_code=", strlen("http://api.heclouds.com/register_de?register_code="));
+    ef_set_env_blob("regist_code1", "SvpKWmGZzilJ3YXv", strlen("SvpKWmGZzilJ3YXv"));
+    ef_set_env_blob("regist_mkey1", "jydOZXTaxHRu0g1sa3LYuVx7hrFdtJQqfK4CxtbmWiM=", strlen("jydOZXTaxHRu0g1sa3LYuVx7hrFdtJQqfK4CxtbmWiM="));
 
-    if (onenet_mqtt_upload_string(argv[1], argv[2]) < 0)
-    {
-        LOG_E("upload string has an error!\n");
-    }
-
+    ef_set_env_blob("is_registed1", "false", strlen("false"));
+    ef_set_env_blob("server_url1", "tcp://183.230.40.39", strlen("tcp://183.230.40.39"));
+    ef_set_env_blob("server_port1", "6002", strlen("6002"));
+    ef_set_env_blob("pro_id1", "360534", strlen("360534"));
     return 0;
 }
-MSH_CMD_EXPORT_ALIAS(onenet_publish_string, onenet_mqtt_publish_string, send string data to onenet cloud);
+MSH_CMD_EXPORT(stp_param, set OneNET defaults param);
 
-/* onenet mqtt command response callback function */
-static void onenet_cmd_rsp_cb(uint8_t *recv_data, size_t recv_size, uint8_t **resp_data, size_t *resp_size)
+/**
+ * 用于蛋蛋平台测试
+ * @return
+ */
+int std_param(void)
 {
-    char res_buf[] = { "cmd is received!\n" };
+    ef_set_env_blob("dev_name1", "dandan", strlen("dandan"));
+    ef_set_env_blob("sn1", "sn888", strlen("sn888"));
+    ef_set_env_blob("regist_url1", "http://swustal.zicp.net/register_de?register_code=", strlen("http://swustal.zicp.net/register_de?register_code="));
+    ef_set_env_blob("regist_code1", "SvpKWmGZzilJ3YXv", strlen("SvpKWmGZzilJ3YXv"));
+    ef_set_env_blob("regist_mkey1", "jydOZXTaxHRu0g1sa3LYuVx7hrFdtJQqfK4CxtbmWiM=", strlen("jydOZXTaxHRu0g1sa3LYuVx7hrFdtJQqfK4CxtbmWiM="));
 
-    LOG_D("recv data is %.*s\n", recv_size, recv_data);
-
-    /* user have to malloc memory for response data */
-    *resp_data = (uint8_t *) ONENET_MALLOC(strlen(res_buf));
-
-    strncpy((char *)*resp_data, res_buf, strlen(res_buf));
-
-    *resp_size = strlen(res_buf);
-}
-
-/* set the onenet mqtt command response callback function */
-int onenet_set_cmd_rsp(int argc, char **argv)
-{
-    onenet_set_cmd_rsp_cb(onenet_cmd_rsp_cb);
+    ef_set_env_blob("is_registed1", "false", strlen("false"));
+    ef_set_env_blob("server_url1", "tcp://103.46.128.41", strlen("tcp://103.46.128.41"));
+    ef_set_env_blob("server_port1", "55421", strlen("55421"));
+    ef_set_env_blob("pro_id1", "20190156", strlen("20190156"));
     return 0;
 }
-MSH_CMD_EXPORT(onenet_set_cmd_rsp, set cmd response function);
-
-#endif /* FINSH_USING_MSH */
+MSH_CMD_EXPORT(std_param, set Local param);

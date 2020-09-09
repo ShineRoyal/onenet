@@ -24,49 +24,47 @@
 #define _ONENET_H_
 
 #include <rtthread.h>
-
+#include <paho_mqtt.h>
 #include <cJSON.h>
-
-#define ONENET_DEBUG                   1
 
 #define ONENET_SW_VERSION              "1.0.0"
 
-#ifndef ONENET_MALLOC
-#define ONENET_MALLOC                  rt_malloc
-#endif
 
-#ifndef ONENET_CALLOC
-#define ONENET_CALLOC                  rt_calloc
-#endif
 
-#ifndef ONENET_FREE
-#define ONENET_FREE                    rt_free
-#endif
+#define ONENET_CLIENT_MAX               3                                   //最大允许的client数量
 
-#ifndef ONENET_MQTT_SUBTOPIC
-#define ONENET_MQTT_SUBTOPIC           "/topic_test"
-#endif
+#define ONENET_PARAM_NAME_LEN           32                                  //easyflash存储参数名称的最大长度
+#define ONENET_GROUP_NAME_LEN           (2 + 1)                             //对于多组参数，参数名长度，不超过2位数
 
-#define ONENET_SERVER_URL              "tcp://183.230.40.39:6002"
-#define ONENET_INFO_DEVID_LEN          16
-#define ONENET_INFO_APIKEY_LEN         32
-#define ONENET_INFO_PROID_LEN          16
-#define ONENET_INFO_AUTH_LEN           64
-#define ONENET_INFO_NAME_LEN           64
-#define ONENET_INFO_URL_LEN            32
+#define ONENET_INFO_NAME_LEN            64                                  //ONENET设备名称长度,仅注册用
+#define ONENET_INFO_AUTH_LEN            64                                  //ONENET鉴权信息长度
 
-#define ONENET_DATASTREAM_NAME_MAX     32
+#define ONENET_INFO_REG_URL_LEN         128                                 //ONENET注册URL长度
+#define ONENET_INFO_REG_CODE_LEN        32                                  //ONENET注册码长度
+#define ONENET_INFO_REG_MKEY_LEN        64                                  //ONENET注册master key长度
+#define ONENET_INFO_REGED_LEN           8                                   //ONENET本地注册成功记录长度
 
+#define ONENET_SERVER_URL_LEN           32                                  //ONENET登录URL
+#define ONENET_SERVER_PORT_LEN          8                                   //ONENET登录端口号
+
+#define ONENET_INFO_PROID_LEN           16                                  //ONENET登录产品ID长度
+#define ONENET_INFO_DEVID_LEN           16                                  //ONENET登录设备ID长度
+#define ONENET_INFO_APIKEY_LEN          64                                  //ONENET HTTP传输API_KEY长度
+
+#define ONENET_DATASTREAM_NAME_MAX      32
+
+
+/**
+ * 定义存储OneNET连接的信息
+ * 长度+1保证字符串结束符不越界
+ */
 struct rt_onenet_info
 {
-    char device_id[ONENET_INFO_DEVID_LEN];
-    char api_key[ONENET_INFO_APIKEY_LEN];
-
-    char pro_id[ONENET_INFO_PROID_LEN];
-    char auth_info[ONENET_INFO_AUTH_LEN];
-
-    char server_uri[ONENET_INFO_URL_LEN];
-
+    char device_id[ONENET_INFO_DEVID_LEN+1];
+    char pro_id[ONENET_INFO_PROID_LEN+1];
+    char auth_info[ONENET_INFO_AUTH_LEN+1];
+    char api_key[ONENET_INFO_APIKEY_LEN+1];
+    char server_uri[ONENET_SERVER_URL_LEN+ONENET_SERVER_PORT_LEN+1];
 };
 typedef struct rt_onenet_info *rt_onenet_info_t;
 
@@ -87,34 +85,30 @@ struct rt_onenet_ds_info
 };
 typedef struct rt_onenet_ds_info *rt_onenet_ds_info_t;
 
+
 /* OneNET MQTT initialize. */
-int onenet_mqtt_init(void);
-
+rt_err_t onenet_mqtt_init(int group);
 /* Publish MQTT data to subscribe topic. */
-rt_err_t onenet_mqtt_publish(const char *topic, const uint8_t *msg, size_t len);
+rt_err_t onenet_mqtt_publish(int group, const char *topic, const uint8_t *msg, size_t len);
+/* Publish MQTT digit data to onenet. */
+rt_err_t onenet_mqtt_upload_digit(int group, const char *ds_name, const double digit);
 
-#ifdef RT_USING_DFS
-/* Publish MQTT binary data to onenet by path. */
-rt_err_t onenet_mqtt_upload_bin_by_path(const char *ds_name, const char *bin_path);
-#endif
+int find_group_by_mqclient(MQTTClient *client);
+
 
 /* Publish MQTT binary data to onenet. */
 rt_err_t onenet_mqtt_upload_bin(const char *ds_name, uint8_t *bin, size_t len);
 
 /* Publish MQTT string data to onenet. */
 rt_err_t onenet_mqtt_upload_string(const char *ds_name, const char *str);
-/* Publish MQTT digit data to onenet. */
-rt_err_t onenet_mqtt_upload_digit(const char *ds_name, const double digit);
+
 
 /* Device send data to OneNET cloud. */
 rt_err_t onenet_http_upload_digit(const char *ds_name, const double digit);
 rt_err_t onenet_http_upload_string(const char *ds_name, const char *str);
 
-#ifdef ONENET_USING_AUTO_REGISTER
 /* Register a device to OneNET cloud. */
-rt_err_t onenet_http_register_device(const char *dev_name, const char *auth_info);
-#endif
-
+rt_err_t onenet_http_register_device(int group, const char *name, const char *auth_info, const char *url, const char *code, const char *mkey);
 /* get a datastream from OneNET cloud. */
 rt_err_t onenet_http_get_datastream(const char *ds_name, struct rt_onenet_ds_info *datastream);
 /* get datapoints from OneNET cloud. Returned cJSON need to be free when user finished using the data. */
@@ -122,18 +116,23 @@ cJSON *onenet_get_dp_by_limit(char *ds_name, size_t limit);
 cJSON *onenet_get_dp_by_start_end(char *ds_name, uint32_t start, uint32_t end, size_t limit);
 cJSON *onenet_get_dp_by_start_duration(char *ds_name, uint32_t start, size_t duration, size_t limit);
 /* Set the command response callback function. User needs to malloc memory for response data. */
-void onenet_set_cmd_rsp_cb(void(*cmd_rsp_cb)(uint8_t *recv_data, size_t recv_size, uint8_t **resp_data, size_t *resp_size));
+
+
+
+
+
+
+
+
 
 /* ========================== User port function ============================ */
-#ifdef ONENET_USING_AUTO_REGISTER
-/* Save device info. */
-rt_err_t onenet_port_save_device_info(char *dev_id, char *api_key);
-/* Get device name and auth info for register. */
-rt_err_t onenet_port_get_register_info(char *dev_name, char *auth_info);
-/* Get device info. */
-rt_err_t onenet_port_get_device_info(char *dev_id, char *api_key, char *auth_info);
 /* Check the device has been registered or not. */
-rt_bool_t onenet_port_is_registed(void);
-#endif
+rt_bool_t onenet_port_is_registed(int group);
+/* Get device info for register. */
+rt_err_t onenet_port_get_register_info(int group, char *dev_name, char *auth_info, char *regist_url, char *regist_code, char *regist_master_key);
+/* Save device info. */
+rt_err_t onenet_port_save_device_info(int group, char *dev_id, char *api_key);
+/* Get device info. */
+rt_err_t onenet_port_get_device_info(int group, char *pro_id, char *dev_id, char *auth_info, char* server_url, char *api_key);
 
 #endif /* _ONENET_H_ */
